@@ -1,0 +1,13 @@
+{
+  "name": "webhook-receiver",
+  "version": "1.0.0",
+  "description": "Webhook receiver for Dapur Kehadiran",
+  "main": "api/webhooks.js",
+  "scripts": {
+    "dev": "vercel dev",
+    "deploy": "vercel --prod"
+  },
+  "keywords": ["webhook", "vercel", "api"],
+  "author": "",
+  "license": "MIT"
+}
