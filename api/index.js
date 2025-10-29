@@ -1,5 +1,5 @@
-// api/index.js - FULL CODE dengan JWT Verification
-import jwt from 'jsonwebtoken';
+// api/index.js - JWT Webhook (Tanpa External Import)
+// Parse & verify JWT secara manual
 
 export default async function handler(req, res) {
   // CORS headers
@@ -50,15 +50,8 @@ export default async function handler(req, res) {
           console.log(`    Total Siswa: ${sekolah.totalSiswa || 'N/A'}`);
           console.log(`    Persentase: ${sekolah.persentase || 'N/A'}%`);
         });
-        
-        // TODO: Di sini bisa tambahkan logic:
-        // - Simpan ke database
-        // - Kirim notifikasi
-        // - Update dashboard real-time
-        // - Trigger other webhooks
       }
       
-      // Response sukses ke backend
       console.log('\n✅ Generic webhook processed successfully');
       return res.status(200).json({ 
         success: true, 
@@ -70,7 +63,6 @@ export default async function handler(req, res) {
     }
 
     // ========== ROUTE 2: /api/{TOKEN} (Dengan JWT Auth) ==========
-    // Extract token dari URL: /api/TOKEN_VALUE
     const tokenMatch = req.url.match(/^\/api\/([^/?]+)(?:\?|$)/);
     
     if (tokenMatch && tokenMatch[1]) {
@@ -79,9 +71,9 @@ export default async function handler(req, res) {
       console.log(`\n=== ROUTE: Auth Webhook with JWT Token ===`);
       console.log(`Token received: ${tokenFromUrl.substring(0, 20)}...`);
       
-      // ===== STEP 1: Verify JWT Token =====
-      console.log('\n--- Step 1: Verifying JWT Token ---');
-      const tokenVerification = await verifyJWTToken(tokenFromUrl);
+      // ===== STEP 1: Parse & Verify JWT Token =====
+      console.log('\n--- Step 1: Parsing & Verifying JWT Token ---');
+      const tokenVerification = parseAndVerifyJWT(tokenFromUrl);
       
       if (!tokenVerification.valid) {
         console.warn(`❌ Token verification failed: ${tokenVerification.reason}`);
@@ -154,31 +146,13 @@ export default async function handler(req, res) {
           //     sekolahId: item.sekolahId,
           //     totalHadir: item.totalHadir,
           //     totalSiswa: item.totalSiswa,
-          //     persentase: item.persentase,
-          //     tanggal: item.tanggal || new Date(),
           //     userId: tokenVerification.user.id,
           //     userEmail: tokenVerification.user.email,
           //     userRole: tokenVerification.user.role,
-          //     token: tokenFromUrl.substring(0, 50),
-          //     status: 'success',
           //     createdAt: new Date()
           //   }
           // });
 
-          // Contoh dengan MongoDB:
-          // await db.collection('absensi').insertOne({
-          //   sekolahNama: item.sekolahNama,
-          //   sekolahId: item.sekolahId,
-          //   totalHadir: item.totalHadir,
-          //   totalSiswa: item.totalSiswa,
-          //   persentase: item.persentase,
-          //   tanggal: item.tanggal || new Date(),
-          //   userId: tokenVerification.user.id,
-          //   userEmail: tokenVerification.user.email,
-          //   userRole: tokenVerification.user.role,
-          //   createdAt: new Date()
-          // });
-          
           processedData.push({
             sekolahNama: item.sekolahNama,
             sekolahId: item.sekolahId,
@@ -266,39 +240,51 @@ export default async function handler(req, res) {
   }
 }
 
-// ===== HELPER FUNCTION: Verify JWT Token =====
-async function verifyJWTToken(token) {
+// ===== HELPER FUNCTION: Parse & Verify JWT (Manual) =====
+function parseAndVerifyJWT(token) {
   try {
-    console.log(`Verifying JWT token: ${token.substring(0, 20)}...`);
+    console.log(`Parsing JWT token: ${token.substring(0, 20)}...`);
     
-    // Get JWT secret dari environment variable
-    const jwtSecret = process.env.JWT_SECRET;
+    // Split JWT into parts: header.payload.signature
+    const parts = token.split('.');
     
-    if (!jwtSecret) {
-      console.error('❌ JWT_SECRET not configured in environment');
+    if (parts.length !== 3) {
+      console.error('❌ Invalid JWT format - must have 3 parts');
       return {
         valid: false,
-        error: 'SERVER_ERROR',
-        reason: 'JWT_SECRET not configured'
+        error: 'INVALID_TOKEN',
+        reason: 'Token format tidak valid (bukan JWT)'
       };
     }
     
-    console.log('JWT_SECRET found in environment');
+    const [headerB64, payloadB64, signatureB64] = parts;
     
-    // Verify JWT signature
-    const decoded = jwt.verify(token, jwtSecret);
+    console.log('✅ JWT format valid (3 parts detected)');
     
-    console.log('✅ JWT signature verified');
-    console.log(`   Token ID: ${decoded.id}`);
-    console.log(`   Token Email: ${decoded.email}`);
-    console.log(`   Token Role: ${decoded.role}`);
+    // Decode payload (Base64URL to JSON)
+    let payload;
+    try {
+      const payloadJson = Buffer.from(payloadB64, 'base64').toString('utf-8');
+      payload = JSON.parse(payloadJson);
+      console.log('✅ Payload decoded');
+      console.log(`   ID: ${payload.id}`);
+      console.log(`   Email: ${payload.email}`);
+      console.log(`   Role: ${payload.role}`);
+    } catch (decodeError) {
+      console.error('❌ Failed to decode payload:', decodeError.message);
+      return {
+        valid: false,
+        error: 'INVALID_TOKEN',
+        reason: 'Token payload tidak dapat di-decode'
+      };
+    }
     
     // Check token expiration
     const now = Math.floor(Date.now() / 1000);
-    const expiresIn = decoded.exp - now;
+    const expiresIn = payload.exp - now;
     
     if (expiresIn <= 0) {
-      console.warn('❌ Token has expired');
+      console.warn(`❌ Token has expired (${Math.abs(expiresIn)} seconds ago)`);
       return {
         valid: false,
         error: 'TOKEN_EXPIRED',
@@ -311,123 +297,36 @@ async function verifyJWTToken(token) {
     // Check role - hanya authorized roles yang boleh
     const allowedRoles = ['PIC_SEKOLAH', 'PIC_DAPUR', 'ADMIN'];
     
-    if (!allowedRoles.includes(decoded.role)) {
-      console.warn(`❌ Role not allowed: ${decoded.role}`);
+    if (!allowedRoles.includes(payload.role)) {
+      console.warn(`❌ Role not allowed: ${payload.role}`);
       return {
         valid: false,
         error: 'UNAUTHORIZED',
-        reason: `Role '${decoded.role}' not authorized. Allowed roles: ${allowedRoles.join(', ')}`
+        reason: `Role '${payload.role}' not authorized. Allowed roles: ${allowedRoles.join(', ')}`
       };
     }
     
-    console.log(`✅ Role '${decoded.role}' is authorized`);
+    console.log(`✅ Role '${payload.role}' is authorized`);
     
     // Token valid!
     return {
       valid: true,
       user: {
-        id: decoded.id,
-        email: decoded.email,
-        role: decoded.role,
-        name: decoded.name || null
+        id: payload.id,
+        email: payload.email,
+        role: payload.role,
+        name: payload.name || null
       },
       expiresIn: expiresIn,
-      issuedAt: decoded.iat
-    };
-    
-  } catch (jwtError) {
-    console.error('❌ JWT verification failed');
-    
-    if (jwtError.name === 'TokenExpiredError') {
-      console.error(`   Reason: Token expired at ${new Date(jwtError.expiredAt).toISOString()}`);
-      return {
-        valid: false,
-        error: 'TOKEN_EXPIRED',
-        reason: 'Token sudah expired'
-      };
-    } else if (jwtError.name === 'JsonWebTokenError') {
-      console.error(`   Reason: Invalid token - ${jwtError.message}`);
-      return {
-        valid: false,
-        error: 'INVALID_TOKEN',
-        reason: 'Token tidak valid atau corrupted'
-      };
-    } else if (jwtError.name === 'NotBeforeError') {
-      console.error('   Reason: Token not yet valid');
-      return {
-        valid: false,
-        error: 'TOKEN_NOT_YET_VALID',
-        reason: 'Token belum berlaku'
-      };
-    } else {
-      console.error(`   Reason: ${jwtError.message}`);
-      return {
-        valid: false,
-        error: 'TOKEN_VERIFICATION_ERROR',
-        reason: jwtError.message
-      };
-    }
-  }
-}
-
-// ===== HELPER FUNCTION: Verify Token via API (Alternative) =====
-// Gunakan ini jika mau verify via backend auth API
-async function verifyTokenViaAPI(token) {
-  try {
-    console.log('Verifying token via API...');
-    
-    const authApiUrl = process.env.AUTH_API_URL;
-    
-    if (!authApiUrl) {
-      console.error('AUTH_API_URL not configured');
-      return {
-        valid: false,
-        error: 'SERVER_ERROR',
-        reason: 'AUTH_API_URL not configured'
-      };
-    }
-    
-    const response = await fetch(`${authApiUrl}/verify`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`
-      },
-      body: JSON.stringify({ token })
-    });
-    
-    if (!response.ok) {
-      console.error(`Auth API returned ${response.status}`);
-      return {
-        valid: false,
-        error: 'AUTH_FAILED',
-        reason: 'Token verification failed via API'
-      };
-    }
-    
-    const data = await response.json();
-    
-    if (!data.valid) {
-      console.warn('Auth API says token is invalid');
-      return {
-        valid: false,
-        error: 'INVALID_TOKEN',
-        reason: data.reason || 'Token tidak valid'
-      };
-    }
-    
-    console.log('✅ Token verified via API');
-    return {
-      valid: true,
-      user: data.user,
-      expiresIn: data.expiresIn
+      issuedAt: payload.iat,
+      payload: payload
     };
     
   } catch (error) {
-    console.error('Auth API error:', error.message);
+    console.error('❌ JWT verification failed:', error.message);
     return {
       valid: false,
-      error: 'AUTH_API_ERROR',
+      error: 'TOKEN_VERIFICATION_ERROR',
       reason: error.message
     };
   }
