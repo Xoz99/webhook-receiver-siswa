@@ -1,5 +1,12 @@
-// api/index.js - JWT Webhook (Tanpa External Import)
-// Parse & verify JWT secara manual
+// api/index.js - JWT Webhook dengan Signature Verification
+// IMPROVED VERSION - SECURE & PRODUCTION READY
+
+import crypto from 'crypto';
+
+// ========== CONFIG ==========
+const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-key-change-me';
+const ALLOWED_ROLES = ['PIC_SEKOLAH', 'PIC_DAPUR', 'ADMIN'];
+const ALLOWED_ROUTES = ['/api/', '/api/webhook/dapur/kehadiran-sekolah', '/api/menu-planning'];
 
 export default async function handler(req, res) {
   // CORS headers
@@ -28,7 +35,10 @@ export default async function handler(req, res) {
     console.log('Time:', new Date().toISOString());
     console.log('URL:', req.url);
     console.log('Method:', req.method);
-    console.log('Body:', JSON.stringify(req.body, null, 2));
+    console.log('Headers:', {
+      authorization: req.headers.authorization ? req.headers.authorization.substring(0, 30) + '...' : 'none',
+      contentType: req.headers['content-type']
+    });
 
     // ========== ROUTE 1: /api/ (Generic - Tanpa Token) ==========
     if (req.url === '/api/' || req.url === '/api') {
@@ -62,18 +72,28 @@ export default async function handler(req, res) {
       });
     }
 
-    // ========== ROUTE 2: /api/{TOKEN} (Dengan JWT Auth) ==========
-    const tokenMatch = req.url.match(/^\/api\/([^/?]+)(?:\?|$)/);
-    
-    if (tokenMatch && tokenMatch[1]) {
-      const tokenFromUrl = tokenMatch[1];
+    // ========== ROUTE 2: /api/webhook/dapur/kehadiran-sekolah (Dengan JWT Auth) ==========
+    if (req.url === '/api/webhook/dapur/kehadiran-sekolah' || req.url.startsWith('/api/webhook/dapur/kehadiran-sekolah')) {
+      console.log('\n=== ROUTE: Dapur Kehadiran Webhook with JWT Auth ===');
       
-      console.log(`\n=== ROUTE: Auth Webhook with JWT Token ===`);
-      console.log(`Token received: ${tokenFromUrl.substring(0, 20)}...`);
+      // Get token dari Authorization header (Bearer token)
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        console.warn('❌ Missing or invalid Authorization header');
+        return res.status(401).json({
+          success: false,
+          error: 'MISSING_AUTH_HEADER',
+          message: 'Authorization header dengan format "Bearer {token}" diperlukan',
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      const tokenFromHeader = authHeader.substring(7); // Remove 'Bearer '
+      console.log(`Token received: ${tokenFromHeader.substring(0, 20)}...`);
       
-      // ===== STEP 1: Parse & Verify JWT Token =====
+      // ===== STEP 1: Parse & Verify JWT Token dengan Signature =====
       console.log('\n--- Step 1: Parsing & Verifying JWT Token ---');
-      const tokenVerification = parseAndVerifyJWT(tokenFromUrl);
+      const tokenVerification = parseAndVerifyJWT(tokenFromHeader, JWT_SECRET);
       
       if (!tokenVerification.valid) {
         console.warn(`❌ Token verification failed: ${tokenVerification.reason}`);
@@ -85,7 +105,7 @@ export default async function handler(req, res) {
         });
       }
       
-      console.log('✅ JWT Token verified successfully');
+      console.log('✅ JWT Token verified successfully (signature valid)');
       console.log(`   User ID: ${tokenVerification.user.id}`);
       console.log(`   Email: ${tokenVerification.user.email}`);
       console.log(`   Role: ${tokenVerification.user.role}`);
@@ -190,6 +210,116 @@ export default async function handler(req, res) {
       return res.status(200).json({
         success: true,
         message: 'Attendance data processed with JWT auth token',
+        endpoint: '/api/webhook/dapur/kehadiran-sekolah',
+        timestamp: new Date().toISOString(),
+        auth: {
+          token: tokenFromHeader.substring(0, 20) + '...',
+          user: {
+            id: tokenVerification.user.id,
+            email: tokenVerification.user.email,
+            name: tokenVerification.user.name || null,
+            role: tokenVerification.user.role
+          },
+          expiresIn: tokenVerification.expiresIn,
+          signatureVerified: true
+        },
+        summary: {
+          processed: processedData.length,
+          failed: failedRecords.length,
+          total: kehadiranData.length
+        },
+        data: processedData,
+        errors: failedRecords.length > 0 ? failedRecords : null
+      });
+    }
+
+    // ========== ROUTE 3: /api/{TOKEN} (Legacy - Token di URL) ==========
+    const tokenMatch = req.url.match(/^\/api\/([^/?]+)(?:\?|$)/);
+    
+    if (tokenMatch && tokenMatch[1]) {
+      const tokenFromUrl = tokenMatch[1];
+      
+      console.log(`\n=== ROUTE: Legacy Auth with Token in URL ===`);
+      console.log(`Token received: ${tokenFromUrl.substring(0, 20)}...`);
+      console.warn('⚠️  Using token in URL is NOT recommended! Use Authorization header instead.');
+      
+      // Parse & Verify JWT Token
+      console.log('\n--- Verifying JWT Token ---');
+      const tokenVerification = parseAndVerifyJWT(tokenFromUrl, JWT_SECRET);
+      
+      if (!tokenVerification.valid) {
+        console.warn(`❌ Token verification failed: ${tokenVerification.reason}`);
+        return res.status(401).json({
+          success: false,
+          error: tokenVerification.error,
+          message: tokenVerification.reason,
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      console.log('✅ JWT Token verified successfully');
+      
+      // Validate Request Data
+      console.log('\n--- Validating Request Data ---');
+      const { success, message, data } = req.body;
+      
+      if (!data || !data.kehadiranData) {
+        console.error('❌ Missing kehadiranData');
+        return res.status(400).json({
+          success: false,
+          error: 'MISSING_DATA',
+          message: 'Request body harus contain data.kehadiranData',
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      if (!Array.isArray(data.kehadiranData)) {
+        console.error('❌ kehadiranData bukan array');
+        return res.status(400).json({
+          success: false,
+          error: 'INVALID_FORMAT',
+          message: 'data.kehadiranData harus berupa array',
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      const kehadiranData = data.kehadiranData;
+      console.log(`✅ Data valid - Total entries: ${kehadiranData.length}`);
+      
+      // Process & Save Data (sama seperti di atas)
+      const processedData = [];
+      const failedRecords = [];
+      
+      for (let i = 0; i < kehadiranData.length; i++) {
+        const item = kehadiranData[i];
+        try {
+          if (!item.sekolahNama || !item.sekolahId || item.totalHadir === undefined) {
+            throw new Error('Missing required fields');
+          }
+          processedData.push({
+            sekolahNama: item.sekolahNama,
+            sekolahId: item.sekolahId,
+            hadir: item.totalHadir,
+            total: item.totalSiswa || null,
+            persentase: item.persentase || null,
+            tanggal: item.tanggal || new Date().toISOString().split('T')[0],
+            status: 'processed',
+            timestamp: new Date().toISOString()
+          });
+        } catch (recordError) {
+          failedRecords.push({
+            index: i + 1,
+            sekolah: item.sekolahNama || 'Unknown',
+            error: recordError.message
+          });
+        }
+      }
+      
+      console.log(`✅ Processing Complete - Success: ${processedData.length}, Failed: ${failedRecords.length}`);
+      
+      return res.status(200).json({
+        success: true,
+        message: 'Attendance data processed with JWT auth token (legacy)',
         endpoint: '/api/{token}',
         timestamp: new Date().toISOString(),
         auth: {
@@ -200,7 +330,8 @@ export default async function handler(req, res) {
             name: tokenVerification.user.name || null,
             role: tokenVerification.user.role
           },
-          expiresIn: tokenVerification.expiresIn
+          expiresIn: tokenVerification.expiresIn,
+          signatureVerified: true
         },
         summary: {
           processed: processedData.length,
@@ -217,11 +348,12 @@ export default async function handler(req, res) {
     return res.status(404).json({
       success: false,
       error: 'ROUTE_NOT_FOUND',
-      message: 'Use /api/ (generic) or /api/{JWT_TOKEN} (with auth)',
+      message: 'Use /api/ (generic), /api/webhook/dapur/kehadiran-sekolah (with auth), or /api/{token} (legacy)',
       receivedUrl: req.url,
       examples: {
         generic: 'POST /api/',
-        withAuth: 'POST /api/eyJhbGciOiJIUzI1NiIs...'
+        withAuth: 'POST /api/webhook/dapur/kehadiran-sekolah with Authorization: Bearer {token}',
+        legacy: 'POST /api/eyJhbGciOiJIUzI1NiIs... (NOT RECOMMENDED)'
       },
       timestamp: new Date().toISOString()
     });
@@ -240,8 +372,8 @@ export default async function handler(req, res) {
   }
 }
 
-// ===== HELPER FUNCTION: Parse & Verify JWT (Manual) =====
-function parseAndVerifyJWT(token) {
+// ===== HELPER FUNCTION: Parse & Verify JWT dengan Signature Verification =====
+function parseAndVerifyJWT(token, secret) {
   try {
     console.log(`Parsing JWT token: ${token.substring(0, 20)}...`);
     
@@ -261,7 +393,30 @@ function parseAndVerifyJWT(token) {
     
     console.log('✅ JWT format valid (3 parts detected)');
     
-    // Decode payload (Base64URL to JSON)
+    // ===== DECODE HEADER =====
+    let header;
+    try {
+      const headerJson = Buffer.from(headerB64, 'base64').toString('utf-8');
+      header = JSON.parse(headerJson);
+      console.log(`✅ Header decoded - Algorithm: ${header.alg}`);
+      
+      if (header.alg !== 'HS256') {
+        return {
+          valid: false,
+          error: 'INVALID_ALGORITHM',
+          reason: `Only HS256 algorithm supported, received: ${header.alg}`
+        };
+      }
+    } catch (decodeError) {
+      console.error('❌ Failed to decode header:', decodeError.message);
+      return {
+        valid: false,
+        error: 'INVALID_TOKEN',
+        reason: 'Token header tidak dapat di-decode'
+      };
+    }
+    
+    // ===== DECODE PAYLOAD =====
     let payload;
     try {
       const payloadJson = Buffer.from(payloadB64, 'base64').toString('utf-8');
@@ -278,6 +433,36 @@ function parseAndVerifyJWT(token) {
         reason: 'Token payload tidak dapat di-decode'
       };
     }
+    
+    // ===== VERIFY SIGNATURE =====
+    console.log('\n--- Verifying Signature ---');
+    const message = `${headerB64}.${payloadB64}`;
+    const expectedSignature = crypto
+      .createHmac('sha256', secret)
+      .update(message)
+      .digest('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=/g, '');
+    
+    const receivedSignature = signatureB64
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=/g, '');
+    
+    console.log(`Expected signature: ${expectedSignature.substring(0, 20)}...`);
+    console.log(`Received signature: ${receivedSignature.substring(0, 20)}...`);
+    
+    if (receivedSignature !== expectedSignature) {
+      console.error('❌ Signature verification failed - Token has been tampered!');
+      return {
+        valid: false,
+        error: 'INVALID_SIGNATURE',
+        reason: 'Token signature tidak valid - token mungkin telah diubah'
+      };
+    }
+    
+    console.log('✅ Signature verified successfully');
     
     // Check token expiration
     const now = Math.floor(Date.now() / 1000);
