@@ -1,156 +1,229 @@
+// pages/api/index.js (atau pages/api/[[...slug]].js)
+// File ini untuk menerima webhook dari PIC_DAPUR
+
 import crypto from 'crypto';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-key-change-me';
+const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-and-long-key';
 
 export default async function handler(req, res) {
-  // CORS headers
+  // ===== CORS HEADERS =====
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS, GET');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Dapur-ID, X-User-Data');
+  res.setHeader('Content-Type', 'application/json');
 
+  // Handle preflight
   if (req.method === 'OPTIONS') {
-    return res.status(200).end();
+    res.status(200).end();
+    return;
   }
 
-  if (req.method !== 'POST') {
-    return res.status(405).json({ 
-      success: false,
-      error: 'METHOD_NOT_ALLOWED',
-      message: 'Only POST requests are accepted'
-    });
-  }
+  // ===== ROUTE HANDLER =====
+  if (req.url === '/api' || req.url === '/api/' || req.url === '/') {
+    try {
+      console.log('\n=== WEBHOOK RECEIVED ===');
+      console.log('URL:', req.url);
+      console.log('Method:', req.method);
+      console.log('Time:', new Date().toISOString());
 
-  try {
-    console.log('=== Webhook Received ===');
-    console.log('URL:', req.url);
-    console.log('Method:', req.method);
-    console.log('Time:', new Date().toISOString());
-
-    // ========== ROUTE 1: /api/ (Generic - Process & Return Data) ==========
-    if (req.url === '/api/' || req.url === '/api') {
-      console.log('\n=== ROUTE: Generic Webhook (Process & Return) ===');
-      
-      const { success, message, data } = req.body;
-      
-      if (!data || !data.kehadiranData) {
-        console.error('❌ Missing kehadiranData');
-        return res.status(400).json({
-          success: false,
-          error: 'MISSING_DATA',
-          message: 'Request body harus contain data.kehadiranData'
+      // ===== HEALTH CHECK (GET) =====
+      if (req.method === 'GET') {
+        console.log('✅ Health check request');
+        return res.status(200).json({
+          success: true,
+          message: 'Webhook receiver is active',
+          timestamp: new Date().toISOString(),
+          endpoint: req.url
         });
       }
 
-      if (!Array.isArray(data.kehadiranData)) {
+      // ===== PROCESS DATA (POST) =====
+      if (req.method !== 'POST') {
+        return res.status(405).json({
+          success: false,
+          error: 'METHOD_NOT_ALLOWED',
+          message: `Method ${req.method} not allowed. Use GET or POST.`
+        });
+      }
+
+      // ===== VALIDATE REQUEST BODY =====
+      const body = req.body;
+
+      if (!body) {
+        console.error('❌ Empty request body');
+        return res.status(400).json({
+          success: false,
+          error: 'EMPTY_BODY',
+          message: 'Request body tidak boleh kosong'
+        });
+      }
+
+      console.log('\n📥 Request Body Received:');
+      console.log(JSON.stringify(body, null, 2));
+
+      // ===== EXTRACT DATA =====
+      // Support multiple format
+      const data = body.data || body;
+      const kehadiranData = data.kehadiranData || data.attendance || [];
+
+      if (!Array.isArray(kehadiranData)) {
         console.error('❌ kehadiranData is not an array');
         return res.status(400).json({
           success: false,
           error: 'INVALID_FORMAT',
-          message: 'data.kehadiranData must be an array'
+          message: 'data.kehadiranData harus berupa array',
+          received_type: typeof kehadiranData,
+          received_value: kehadiranData
         });
       }
 
-      const kehadiranData = data.kehadiranData;
-      console.log(`\n✅ Valid data received - Processing ${kehadiranData.length} records`);
+      if (kehadiranData.length === 0) {
+        console.warn('⚠️ Received empty array');
+        return res.status(400).json({
+          success: false,
+          error: 'EMPTY_ARRAY',
+          message: 'kehadiranData array tidak boleh kosong'
+        });
+      }
 
-      // ===== PROCESS DATA =====
+      console.log(`\n✅ Valid data - Processing ${kehadiranData.length} records`);
+
+      // ===== PROCESS EACH RECORD =====
       const processedData = [];
       const failedRecords = [];
 
       kehadiranData.forEach((record, index) => {
         try {
           // Validate required fields
-          if (!record.sekolahNama || !record.sekolahId || record.totalHadir === undefined) {
-            throw new Error('Missing required fields: sekolahNama, sekolahId, totalHadir');
+          const requiredFields = ['sekolahNama', 'sekolahId', 'totalHadir'];
+          const missingFields = requiredFields.filter(field => 
+            record[field] === undefined || record[field] === null
+          );
+
+          if (missingFields.length > 0) {
+            throw new Error(`Missing fields: ${missingFields.join(', ')}`);
           }
 
-          console.log(`\n[${index + 1}] Processing: ${record.sekolahNama}`);
-          console.log(`    - Hadir: ${record.totalHadir}/${record.totalSiswa || 'N/A'}`);
-          console.log(`    - Persentase: ${record.persentase || 'N/A'}%`);
+          console.log(`\n[${index + 1}/${kehadiranData.length}] Processing: ${record.sekolahNama}`);
+          console.log(`   └─ Hadir: ${record.totalHadir}/${record.totalSiswa || 'N/A'}`);
 
-          // ===== PROCESS & TRANSFORM DATA =====
+          // ===== CALCULATE STATISTICS =====
+          const totalSiswa = record.totalSiswa || 0;
+          const totalHadir = record.totalHadir || 0;
+          const attendanceRate = totalSiswa > 0 
+            ? Math.round((totalHadir / totalSiswa) * 100)
+            : 0;
+
+          // ===== CREATE PROCESSED RECORD =====
           const processed = {
+            // Original data
             sekolahId: record.sekolahId,
             sekolahNama: record.sekolahNama,
-            totalHadir: record.totalHadir,
-            totalSiswa: record.totalSiswa || null,
-            persentase: record.persentase || 0,
+            totalHadir: totalHadir,
+            totalSiswa: totalSiswa,
+            persentase: record.persentase || attendanceRate,
             tanggal: record.tanggal || new Date().toISOString().split('T')[0],
-            // ===== ADD PROCESSING LOGIC =====
-            status: record.totalHadir > 0 ? 'PRESENT' : 'ABSENT',
-            attendance_rate: record.totalSiswa 
-              ? Math.round((record.totalHadir / record.totalSiswa) * 100)
-              : 0,
+
+            // Calculated fields
+            status: totalHadir > 0 ? 'PRESENT' : 'ABSENT',
+            attendance_rate: attendanceRate,
+            totalAbsen: totalSiswa - totalHadir,
+            
+            // Metadata
             processed_at: new Date().toISOString(),
-            record_id: `${record.sekolahId}-${record.tanggal}-${Date.now()}`
+            record_id: crypto
+              .createHash('md5')
+              .update(`${record.sekolahId}-${record.tanggal}-${totalHadir}`)
+              .digest('hex')
           };
 
           processedData.push(processed);
-          console.log(`    ✅ Processed successfully`);
+          console.log(`   ✅ Success (Rate: ${attendanceRate}%)`);
 
         } catch (error) {
-          console.error(`    ❌ Error: ${error.message}`);
+          console.error(`   ❌ Error: ${error.message}`);
           failedRecords.push({
             index: index + 1,
             sekolah: record.sekolahNama || 'Unknown',
-            error: error.message
+            error: error.message,
+            data: record
           });
         }
       });
 
-      // ===== LOG SUMMARY =====
-      console.log('\n--- Processing Summary ---');
-      console.log(`✅ Success: ${processedData.length}`);
-      console.log(`❌ Failed: ${failedRecords.length}`);
-      console.log(`📊 Total: ${kehadiranData.length}`);
+      // ===== CALCULATE SUMMARY =====
+      const totalPresent = processedData.reduce((sum, r) => sum + r.totalHadir, 0);
+      const totalStudents = processedData.reduce((sum, r) => sum + r.totalSiswa, 0);
+      const avgAttendanceRate = processedData.length > 0
+        ? Math.round(
+            processedData.reduce((sum, r) => sum + r.attendance_rate, 0) / 
+            processedData.length
+          )
+        : 0;
 
-      // ===== RETURN PROCESSED DATA =====
-      console.log('\n✅ Returning processed data to client');
+      console.log('\n--- PROCESSING SUMMARY ---');
+      console.log(`✅ Success: ${processedData.length}/${kehadiranData.length}`);
+      console.log(`❌ Failed: ${failedRecords.length}/${kehadiranData.length}`);
+      console.log(`📊 Avg Attendance Rate: ${avgAttendanceRate}%`);
+      console.log(`📊 Total Present: ${totalPresent}/${totalStudents}`);
 
-      return res.status(200).json({
+      // ===== RETURN RESPONSE =====
+      const response = {
         success: true,
         message: 'Attendance data received and processed successfully',
-        endpoint: '/api/',
+        endpoint: req.url,
         receivedAt: new Date().toISOString(),
-        dataCount: kehadiranData.length,
-        // ===== RETURN PROCESSED DATA BACK =====
-        processed_data: processedData,
+        
+        // Data summary
         summary: {
           total_records: kehadiranData.length,
           processed: processedData.length,
           failed: failedRecords.length,
           success_rate: `${Math.round((processedData.length / kehadiranData.length) * 100)}%`
         },
-        errors: failedRecords.length > 0 ? failedRecords : null,
-        // ===== CALCULATIONS =====
+
+        // Processed data
+        processed_data: processedData,
+
+        // Statistics
         statistics: {
-          total_present: processedData.reduce((sum, r) => sum + r.totalHadir, 0),
-          total_students: processedData.reduce((sum, r) => sum + (r.totalSiswa || 0), 0),
-          average_attendance_rate: Math.round(
-            processedData.reduce((sum, r) => sum + r.attendance_rate, 0) / (processedData.length || 1)
-          )
-        }
+          total_present: totalPresent,
+          total_students: totalStudents,
+          total_absent: totalStudents - totalPresent,
+          average_attendance_rate: avgAttendanceRate
+        },
+
+        // Errors (if any)
+        ...(failedRecords.length > 0 && { errors: failedRecords })
+      };
+
+      console.log('\n✅ Sending response...');
+      return res.status(200).json(response);
+
+    } catch (error) {
+      console.error('\n=== CRITICAL ERROR ===');
+      console.error('Error:', error.message);
+      console.error('Stack:', error.stack);
+
+      return res.status(500).json({
+        success: false,
+        error: 'INTERNAL_SERVER_ERROR',
+        message: error.message,
+        timestamp: new Date().toISOString()
       });
     }
-
-    // ========== ROUTE NOT FOUND ==========
-    console.warn('⚠️ Route not recognized');
-    return res.status(404).json({
-      success: false,
-      error: 'ROUTE_NOT_FOUND',
-      message: 'Use /api/ endpoint to send attendance data',
-      receivedUrl: req.url
-    });
-
-  } catch (error) {
-    console.error('=== CRITICAL ERROR ===');
-    console.error('Error:', error.message);
-    console.error('Stack:', error.stack);
-    
-    return res.status(500).json({ 
-      success: false,
-      error: 'INTERNAL_SERVER_ERROR',
-      message: error.message
-    });
   }
+
+  // ===== ROUTE NOT FOUND =====
+  console.warn('⚠️ Route not found:', req.url);
+  return res.status(404).json({
+    success: false,
+    error: 'ROUTE_NOT_FOUND',
+    message: 'Use /api endpoint to send attendance data',
+    receivedUrl: req.url,
+    availableEndpoints: [
+      'GET /api - Health check',
+      'POST /api - Send attendance data'
+    ]
+  });
 }
