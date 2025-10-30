@@ -1,11 +1,6 @@
-// api/index.js - JWT Webhook dengan Signature Verification
-// IMPROVED VERSION - SECURE & PRODUCTION READY
-
 import crypto from 'crypto';
-
-// ========== CONFIG ==========
-const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-key-change-me';
-const ALLOWED_ROLES = ['PIC_SEKOLAH', 'PIC_DAPUR', 'ADMIN'];
+const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-and-long-key';
+const ALLOWED_ROLES = ['PIC_DAPUR'];
 const ALLOWED_ROUTES = ['/api/', '/api/webhook/dapur/kehadiran-sekolah', '/api/menu-planning'];
 
 export default async function handler(req, res) {
@@ -14,12 +9,10 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS, GET');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
-  // Handle preflight request
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
 
-  // Hanya terima POST method
   if (req.method !== 'POST') {
     return res.status(405).json({ 
       success: false,
